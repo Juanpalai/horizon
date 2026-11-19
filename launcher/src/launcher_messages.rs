@@ -60,6 +60,7 @@ impl Launcher {
                     self.multiplayer.stale();
                     telemetry::set_official_server(&links.official_server);
                     self.links = links;
+                    self.follow_min_launcher(cx);
                 }
                 // The page reads is_prepared when drawn; `changed` redraws it.
                 Msg::Reused(_) => self.installed = backend::installed(),
@@ -354,6 +355,7 @@ impl Launcher {
                         }
                         Err(e) => SelfUpdate::Failed(e),
                     };
+                    self.follow_min_launcher(cx);
                 }
                 Msg::PackLine(line) => {
                     self.pack_log.push_back(line);
@@ -393,6 +395,9 @@ impl Launcher {
                     match job {
                         Job::Prepare => {
                             self.preparing = false;
+                            let tag = self.prepare_tag.take();
+                            let error =
+                                prepare_outcome(error, tag.as_deref(), backend::check_prepared);
                             // A Play waiting for this preparation starts below once nothing
                             // else is starting; one it failed for cannot.
                             if error.is_some() {
@@ -521,5 +526,44 @@ impl Launcher {
         if changed {
             cx.notify();
         }
+    }
+}
+
+/// What a preparation for `tag` that ended with `error` says: its error, or, when it ended
+/// without one but `ready` finds `tag` still not prepared, that, rather than nothing.
+fn prepare_outcome(
+    error: Option<String>,
+    tag: Option<&str>,
+    ready: impl Fn(&str) -> bool,
+) -> Option<String> {
+    error.or_else(|| tag.filter(|tag| !ready(tag)).map(not_prepared_after))
+}
+
+/// What Home says when a preparation ended without an error but `tag` still isn't prepared: the
+/// game can't start, and the button alone would only offer the same step again.
+fn not_prepared_after(tag: &str) -> String {
+    crate::i18n::trf(
+        "The preparation of {version} ended, but its files are still not ready, so the game can't start.",
+        &[("version", tag)],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_preparation_that_leaves_its_version_unprepared_says_so() {
+        let failed = Some("Exited with 1".to_string());
+        assert_eq!(
+            prepare_outcome(failed.clone(), Some("v1"), |_| false),
+            failed
+        );
+        assert_eq!(prepare_outcome(None, Some("v1"), |_| true), None);
+        assert_eq!(prepare_outcome(None, None, |_| false), None);
+        assert_eq!(
+            prepare_outcome(None, Some("v1"), |_| false),
+            Some(not_prepared_after("v1"))
+        );
     }
 }
