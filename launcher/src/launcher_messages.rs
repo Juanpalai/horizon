@@ -393,12 +393,10 @@ impl Launcher {
                     match job {
                         Job::Prepare => {
                             self.preparing = false;
-                            // Play pressed before the version was prepared plays now.
-                            if let Some((tag, instance)) = self.play_when_prepared.take() {
-                                if error.is_none() && backend::check_prepared(&tag) {
-                                    self.starting_pack = None;
-                                    self.start_client(tag, Some(instance));
-                                }
+                            // A Play waiting for this preparation starts below once nothing
+                            // else is starting; one it failed for cannot.
+                            if error.is_some() {
+                                self.play_when_prepared = None;
                             }
                             if let (None, Some(started)) = (&error, self.prepare_started.take()) {
                                 self.perf.record_since("launcher.prepare_ms", started);
@@ -517,6 +515,9 @@ impl Launcher {
         {
             self.check_updates();
         }
+        // A Play that waited for its version, or for another start (a pre-launch command's
+        // Stop among it) to finish, starts as soon as nothing else is starting.
+        self.start_queued_play();
         if changed {
             cx.notify();
         }
