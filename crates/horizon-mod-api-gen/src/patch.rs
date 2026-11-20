@@ -1595,9 +1595,19 @@ fn resolve_module(source: &mut Source, module: &str, path: &syn::Path) -> Option
     Some(base)
 }
 
-/// The path `module` imports `name` from, when one of its `use` items binds it.
+/// Whether an item is compiled only under a `cfg`: its condition would be lost when its import is
+/// written at another module's path.
+fn conditional(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
+}
+
+/// The path `module` imports `name` from, when exactly one unconditional `use` binds it: two
+/// bindings, or a binding under a `cfg`, name it only in some builds.
 fn reexport_target(source: &mut Source, module: &str, name: &str) -> Option<syn::Path> {
     let items = source.module(module).ok()?.items.clone();
+    let mut bound = Vec::new();
     for item in &items {
         let Item::Use(item) = item else {
             continue;
@@ -1614,15 +1624,20 @@ fn reexport_target(source: &mut Source, module: &str, name: &str) -> Option<syn:
                 && import.name.as_deref() == Some(name)
                 && import.path.leading_colon.is_none()
             {
-                return Some(import.path);
+                bound.push((conditional(&item.attrs), import.path));
             }
         }
     }
-    None
+    match bound.as_slice() {
+        [(false, path)] => Some(path.clone()),
+        _ => None,
+    }
 }
 
 /// The lower-crate module a game module stands in for: a module that re-exports another crate's
 /// same-named module keeps that module's names, so an import of the module itself must name it.
+/// Only a module made of those re-exports stands in for another: one with an item of its own, or
+/// with a `cfg` on one, keeps its own path.
 fn module_origin(source: &mut Source, module: &str) -> Option<syn::Path> {
     let own = crate_of(module).to_owned();
     let last = module.rsplit("::").next()?.to_owned();
@@ -1630,8 +1645,11 @@ fn module_origin(source: &mut Source, module: &str) -> Option<syn::Path> {
     let mut origins = BTreeSet::new();
     for item in &items {
         let Item::Use(item) = item else {
-            continue;
+            return None;
         };
+        if conditional(&item.attrs) {
+            return None;
+        }
         let prefix = syn::Path {
             leading_colon: item.leading_colon,
             segments: Default::default(),
@@ -1639,27 +1657,23 @@ fn module_origin(source: &mut Source, module: &str) -> Option<syn::Path> {
         let mut imports = Vec::new();
         flatten_use(&item.tree, &prefix, &mut imports);
         for import in imports {
-            if import.glob {
-                continue;
+            let segments = plain_path(&import.path)?;
+            let first = segments.first()?;
+            if segments.len() < 2
+                || matches!(first.as_str(), "self" | "super" | "crate")
+                || *first == own
+            {
+                return None;
             }
-            let Some(segments) = plain_path(&import.path) else {
-                continue;
-            };
-            if segments.len() < 2 {
-                continue;
-            }
-            let first = &segments[0];
-            if matches!(first.as_str(), "self" | "super" | "crate") || *first == own {
-                continue;
-            }
-            let target = if import.module {
+            let target = if import.glob || import.module {
                 segments.join("::")
             } else {
                 segments[..segments.len() - 1].join("::")
             };
-            if target != module && target.rsplit("::").next() == Some(last.as_str()) {
-                origins.insert(target);
+            if target == module || target.rsplit("::").next() != Some(last.as_str()) {
+                return None;
             }
+            origins.insert(target);
         }
     }
     if origins.len() != 1 {
@@ -1719,14 +1733,25 @@ fn canonical_target(
     canonical_target(source, &base, &target, depth + 1)
 }
 
-/// A `use` item rebuilt from one of its names' paths and alias.
+/// A `use` item rebuilt from one of its names' paths and alias. A resolved path that ends in
+/// another name keeps the name the copied code uses, as an alias.
 fn use_item(item: &syn::ItemUse, import: &Imported, path: &syn::Path) -> syn::ItemUse {
     let attrs = &item.attrs;
     let vis = &item.vis;
     let tree = match (&import.rename, import.glob) {
         (_, true) => quote!(#path::*),
         (Some(rename), false) => quote!(#path as #rename),
-        (None, false) => quote!(#path),
+        (None, false) => {
+            let bound = import
+                .name
+                .as_deref()
+                .filter(|name| path.segments.last().is_some_and(|s| s.ident != *name))
+                .and_then(|name| syn::parse_str::<syn::Ident>(name).ok());
+            match bound {
+                Some(alias) => quote!(#path as #alias),
+                None => quote!(#path),
+            }
+        }
     };
     syn::parse2(quote!(#(#attrs)* #vis use #tree;)).expect("a use item")
 }
@@ -2713,6 +2738,98 @@ mod tests {
                 "use::horizon_gameplay::execution_role::ExecutionRole;",
             ]
         );
+    }
+
+    #[test]
+    fn an_import_bound_by_conditional_reexports_keeps_its_path() {
+        let mut source = api_source(&[
+            ("horizon_client::game", "use self::api_values::Value;"),
+            (
+                "horizon_client::game::api_values",
+                "#[cfg(windows)] pub(crate) use horizon_gameplay::api_values::Value;\n\
+                 #[cfg(unix)] pub(crate) use horizon_windows::api_values::Value;",
+            ),
+        ]);
+        assert_eq!(
+            imports_of(&mut source, "horizon_client::game"),
+            ["useself::api_values::Value;"]
+        );
+    }
+
+    #[test]
+    fn a_facade_with_its_own_items_keeps_its_module_path() {
+        let mut source = api_source(&[
+            (
+                "horizon_client::game::native_hooks",
+                "use super::execution_role::{self, ExecutionRole};",
+            ),
+            (
+                "horizon_client::game::execution_role",
+                "pub(super) use horizon_gameplay::execution_role::ExecutionRole;\n\
+                 pub(super) fn local_helper() {}",
+            ),
+        ]);
+        assert_eq!(
+            imports_of(&mut source, "horizon_client::game::native_hooks"),
+            [
+                "usesuper::execution_role;",
+                "use::horizon_gameplay::execution_role::ExecutionRole;",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reexport_that_renames_keeps_the_bound_name() {
+        let mut source = api_source(&[
+            (
+                "horizon_client::game::native_hooks",
+                "use super::execution_role::Alias;",
+            ),
+            (
+                "horizon_client::game::execution_role",
+                "pub(crate) use horizon_gameplay::execution_role::Original as Alias;",
+            ),
+        ]);
+        assert_eq!(
+            imports_of(&mut source, "horizon_client::game::native_hooks"),
+            ["use::horizon_gameplay::execution_role::OriginalasAlias;"]
+        );
+    }
+
+    /// A source whose modules are the parsed text, for the re-export resolution tests.
+    fn api_source(modules: &[(&str, &str)]) -> Source {
+        Source {
+            root: PathBuf::new(),
+            loaded: BTreeSet::new(),
+            files: BTreeMap::new(),
+            parsed: modules
+                .iter()
+                .map(|(name, text)| {
+                    (
+                        (*name).to_owned(),
+                        Module {
+                            items: syn::parse_file(text).unwrap().items,
+                        },
+                    )
+                })
+                .collect(),
+            local_macros: BTreeSet::new(),
+            libraries: BTreeMap::new(),
+            owners: BTreeMap::new(),
+            cache: Cache::default(),
+            hashes: BTreeMap::new(),
+            stale: None,
+        }
+    }
+
+    /// The mirror's `use` items, as written in its source.
+    fn imports_of(source: &mut Source, module: &str) -> Vec<String> {
+        let out = mirror(source, module, &Tree::default(), false, None, None).unwrap();
+        let parsed: syn::File = syn::parse2(out).unwrap();
+        uses(&parsed.items)
+            .iter()
+            .map(|item| item.to_token_stream().to_string().replace(' ', ""))
+            .collect()
     }
 
     #[test]
