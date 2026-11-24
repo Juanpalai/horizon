@@ -2831,6 +2831,38 @@ mod tests {
             Projectile::new(ProjectileKind::Snowball, Vec3::new(0.5, -129.0, 0.5), None);
         assert!(!below.tick(&w).0, "onBelowWorld still discards");
     }
+    /// The DragonFireball owner-hit early return: a fireball whose ray meets
+    /// its own dragon does nothing and stays there (#20710). This is the one
+    /// branch whose age bound (1200) the change removed, so it gets its own
+    /// stay-alive: vanilla's `DragonFireball` never counts its age either.
+    /// After the early return the fireball sits on its dragon's inflated box,
+    /// where a ray has no entry to hit, so every tick re-pins one arrival: the
+    /// `control_a_dragon_fireball_stops_at_its_owner_and_flies_on` control above
+    /// already shows what one arrival does (stop, no hit, motion kept).
+    #[test]
+    fn a_dragon_fireball_parked_on_its_owner_has_no_lifetime() {
+        let boxed = |x: f64| Aabb::new(Vec3::new(x, 100.0, 0.0), Vec3::new(x + 0.2, 101.0, 1.0));
+        let mut p = Projectile::new(
+            ProjectileKind::DragonFireball,
+            Vec3::new(0.0, 100.5, 0.5),
+            Some(Who::Mob(7)),
+        );
+        p.left_owner = true;
+        // No wall behind: the fireball eases its motion every tick, and a wall
+        // would take a legitimate block impact sooner or later. `Empty` clips
+        // nothing, so the ray only ever meets its own dragon's box.
+        let w = Empty(vec![(Who::Mob(7), boxed(0.4))]);
+        for _ in 0..1201 {
+            p.position = Vec3::new(0.0, 100.5, 0.5);
+            p.velocity = Vec3::new(0.5, 0.0, 0.0);
+            let age = p.age;
+            assert!(
+                p.tick(&w).0,
+                "the fireball arriving at its owner discarded at age {age}"
+            );
+        }
+        assert_eq!(p.age, 1201);
+    }
     #[test]
     fn arrow_damage_is_speed_times_base() {
         let mut p = Projectile::new(
