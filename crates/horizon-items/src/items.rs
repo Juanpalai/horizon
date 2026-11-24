@@ -638,8 +638,9 @@ pub fn inline_instrument(stack: &ItemStack) -> Option<&horizon_core::nbt::Tag> {
     }
 }
 /// `Instrument.DIRECT_CODEC`: a `sound_event` that is an id or `{sound_id}`,
-/// `use_duration`, `range` and a non-negative `durability_damage` (0 when the
-/// instrument leaves it out, as the built-in goat horn instruments do).
+/// `use_duration`, `range` and `durability_damage`, clamped to 0 when negative
+/// and 0 when the instrument leaves it out, as the built-in goat horn
+/// instruments do.
 fn parse_instrument(v: &Value) -> Instrument {
     let sound = match &v["sound_event"] {
         Value::String(s) => s.clone(),

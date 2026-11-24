@@ -391,12 +391,34 @@ mod tests {
             game.use_instrument(&stock);
             assert_eq!(game.held().map(|stack| stack.damage), Some(0));
 
+            // The break the issue predicts: a horn with 1 point left breaks on
+            // that use (`hurtAndBreak`'s count 0, through the ordinary break
+            // path), and the use still counts its statistic. The wear reads the
+            // stack's own damage, so the pre-damage goes to both the field and
+            // the component, as the item-data pipeline would leave them.
+            let mut fragile = horn(3);
+            fragile
+                .data_mut()
+                .set_other("minecraft:max_damage", Some(Tag::Int(4)));
+            fragile.damage = 3;
+            fragile
+                .data_mut()
+                .set_other("minecraft:damage", Some(Tag::Int(3)));
+
             let horn = horn(3);
             *game.held_mut() = Some(horn.clone());
+            let used_before = game.stats.get("used", "minecraft:goat_horn");
             game.use_instrument(&horn);
             assert_eq!(game.held().map(|stack| stack.damage), Some(3));
             game.use_instrument(&horn);
             assert_eq!(game.held().map(|stack| stack.damage), Some(6));
+            *game.held_mut() = Some(fragile.clone());
+            game.use_instrument(&fragile);
+            assert_eq!(game.held(), None, "the horn breaks at 6 of 4");
+            assert_eq!(
+                game.stats.get("used", "minecraft:goat_horn"),
+                used_before + 3
+            );
         })
         .expect("prepared resources");
     }
