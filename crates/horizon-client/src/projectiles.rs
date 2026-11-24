@@ -1883,6 +1883,10 @@ impl Projectile {
         self.velocity = w.pushed_by_currents(self.bounds(), self.velocity);
         // No kind counts its age: a projectile that meets nothing lives as long
         // as its chunk does. `Entity.onBelowWorld` is the only removal here.
+        // Vanilla's `AbstractHurtingProjectile.tick` also discards when the
+        // owner is removed or the chunk is unloaded; `ProjectileWorld` offers no
+        // owner-alive or chunk-loaded answer to build that branch from, so the
+        // divergence is intended until #21117 carries it.
         let alive = self.position.y >= w.below_world_y();
         (alive, Hit::None)
     }
