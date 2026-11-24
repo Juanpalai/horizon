@@ -54,7 +54,8 @@ impl Game<'_> {
     /// `InstrumentItem.use` for a goat horn: the player holds it up for the
     /// instrument's `use_duration`, its sound plays at the player
     /// (`SoundSource.RECORDS`, volume `range / 16`), `INSTRUMENT_PLAY` is
-    /// posted, the used statistic counts and the horn is on cooldown as long.
+    /// posted, the horn wears by the instrument's `durability_damage`, the
+    /// used statistic counts and the horn is on cooldown as long.
     /// A horn whose instrument is unknown fails, which still ends the click.
     pub(super) fn use_instrument(&mut self, stack: &ItemStack) {
         let Some(instrument) = self.res.items().instrument(stack) else {
@@ -66,6 +67,12 @@ impl Game<'_> {
             "minecraft:instrument_play",
             horizon_client::mobs::Who::Player,
         );
+        if instrument.durability_damage > 0 {
+            self.damage_held_in_slot(
+                instrument.durability_damage as u32,
+                self.acting_hand_slot(),
+            );
+        }
         if instrument.use_duration > 0.0 {
             let group = horizon_client::cooldowns::group(stack, None);
             self.add_cooldown(group, instrument.use_ticks());
@@ -328,5 +335,69 @@ impl Game<'_> {
             stack,
             self.items().get(&stack.item).map(|i| i.interact_vibrations),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::item_use::interact_vibration_tests::with_game;
+    use horizon_core::nbt::Tag;
+
+    /// Give `stack` the durability components a horn needs to wear: the 26.3
+    /// goat horn item carries no `max_damage`, so only a stack a datapack made
+    /// damageable takes `hurtAndBreak` wear.
+    fn damageable(stack: &mut ItemStack) {
+        let data = stack.data_mut();
+        data.set_other("minecraft:max_damage", Some(Tag::Int(64)));
+        data.set_other("minecraft:damage", Some(Tag::Int(0)));
+        data.explicit_zero_damage = true;
+    }
+
+    /// A damageable goat horn carrying an inline `instrument` that wears it by
+    /// `durability_damage`.
+    fn horn(durability_damage: i32) -> ItemStack {
+        let mut stack = ItemStack::new("minecraft:goat_horn", 1);
+        damageable(&mut stack);
+        stack.data_mut().set_other(
+            "minecraft:instrument",
+            Some(Tag::compound([
+                (
+                    "sound_event",
+                    Tag::String("minecraft:item.goat_horn.sound.0".into()),
+                ),
+                ("use_duration", Tag::Float(1.0f32.to_bits())),
+                ("range", Tag::Float(64.0f32.to_bits())),
+                ("durability_damage", Tag::Int(durability_damage)),
+                ("description", Tag::String("Test".into())),
+            ])),
+        );
+        stack
+    }
+
+    /// `InstrumentItem.use` hurts the horn by `instrument.durabilityDamage`
+    /// after it plays and before its cooldown, every time it plays; the
+    /// built-in instruments leave the damage at 0, so a stock goat horn never
+    /// wears out from playing.
+    #[test]
+    #[ignore = "daily"]
+    fn a_horn_wears_by_its_instruments_durability_damage() {
+        with_game("minecraft:goat_horn", |game| {
+            game.creative = false;
+            // The built-in ponder horn has no durability_damage.
+            let mut stock = game.held().cloned().expect("a held goat horn");
+            damageable(&mut stock);
+            *game.held_mut() = Some(stock.clone());
+            game.use_instrument(&stock);
+            assert_eq!(game.held().map(|stack| stack.damage), Some(0));
+
+            let horn = horn(3);
+            *game.held_mut() = Some(horn.clone());
+            game.use_instrument(&horn);
+            assert_eq!(game.held().map(|stack| stack.damage), Some(3));
+            game.use_instrument(&horn);
+            assert_eq!(game.held().map(|stack| stack.damage), Some(6));
+        })
+        .expect("prepared resources");
     }
 }

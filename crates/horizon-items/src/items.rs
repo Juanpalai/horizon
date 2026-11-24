@@ -594,6 +594,8 @@ pub struct Instrument {
     pub use_duration: f32,
     /// How far it carries, in blocks (`range / 16` is its volume).
     pub range: f32,
+    /// Durability the horn loses each time it plays (`Instrument.durabilityDamage`).
+    pub durability_damage: i32,
 }
 impl Instrument {
     /// `InstrumentItem.getUseDuration`: `Mth.floor(useDuration * 20)`.
@@ -636,7 +638,8 @@ pub fn inline_instrument(stack: &ItemStack) -> Option<&horizon_core::nbt::Tag> {
     }
 }
 /// `Instrument.DIRECT_CODEC`: a `sound_event` that is an id or `{sound_id}`,
-/// `use_duration` and `range`.
+/// `use_duration`, `range` and a non-negative `durability_damage` (0 when the
+/// instrument leaves it out, as the built-in goat horn instruments do).
 fn parse_instrument(v: &Value) -> Instrument {
     let sound = match &v["sound_event"] {
         Value::String(s) => s.clone(),
@@ -646,6 +649,10 @@ fn parse_instrument(v: &Value) -> Instrument {
         sound,
         use_duration: v["use_duration"].as_f64().unwrap_or(0.0) as f32,
         range: v["range"].as_f64().unwrap_or(0.0) as f32,
+        durability_damage: v["durability_damage"]
+            .as_i64()
+            .unwrap_or(0)
+            .clamp(0, i32::MAX as i64) as i32,
     }
 }
 #[path = "condition_files.rs"]
@@ -3322,6 +3329,28 @@ mod tests {
     use super::*;
     use horizon_core::random::LegacyRandom;
     use serde_json::json;
+
+    /// `Instrument.DIRECT_CODEC` reads `durability_damage` as a non-negative
+    /// int that defaults to 0: the built-in instruments leave it out, and a
+    /// datapack's or an inline instrument sets how much a horn wears per use.
+    #[test]
+    fn an_instrument_durability_damage_is_a_non_negative_int() {
+        let instrument = |durability_damage: Option<i32>| {
+            let mut value = json!({
+                "sound_event": "minecraft:item.goat_horn.sound.0",
+                "use_duration": 1.0,
+                "range": 64.0,
+            });
+            if let Some(damage) = durability_damage {
+                value["durability_damage"] = json!(damage);
+            }
+            parse_instrument(&value).durability_damage
+        };
+        assert_eq!(instrument(None), 0);
+        assert_eq!(instrument(Some(3)), 3);
+        // NON_NEGATIVE_INT: a negative value never wears a horn.
+        assert_eq!(instrument(Some(-3)), 0);
+    }
 
     /// The ids `/loot ... loot <id>` takes: a content mod's table in the
     /// root and a world pack's table over it.
