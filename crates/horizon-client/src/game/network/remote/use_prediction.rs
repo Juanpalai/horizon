@@ -429,11 +429,11 @@ impl Game<'_> {
         start || !matches!(&*held.item, "minecraft:bow" | "minecraft:crossbow")
     }
     /// `InstrumentItem.use` on this client: unless the horn is on cooldown,
-    /// it is held up, plays its sound at the player, wears by the
-    /// instrument's `durability_damage` — the prediction of the server's
-    /// `use_instrument` wear, so the durability bar moves before the
-    /// inventory sync confirms it, like every other wear in this menu — and
-    /// starts its cooldown.
+    /// it is held up, plays its sound at the player and starts its cooldown.
+    /// No wear here: vanilla's `ItemStack.hurtAndBreak` only applies damage on
+    /// the server (`owner.level() instanceof ServerLevel`), so the client's
+    /// durability bar moves when the server's slot update arrives, not at the
+    /// click.
     pub(super) fn remote_use_instrument_body(&mut self, held: &ItemStack) {
         let Some(instrument) = self.res.items().instrument(held) else {
             return;
@@ -444,12 +444,6 @@ impl Game<'_> {
         }
         self.start_using_item();
         self.play_player_bound_sound(&instrument.sound, 2, instrument.range / 16.0, 1.0, true);
-        if instrument.durability_damage > 0 {
-            self.damage_held_in_slot(
-                instrument.durability_damage as u32,
-                self.acting_hand_slot(),
-            );
-        }
         if instrument.use_duration > 0.0 {
             self.add_cooldown(group, instrument.use_ticks());
         }
