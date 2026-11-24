@@ -1818,7 +1818,8 @@ impl Projectile {
         {
             self.position = at;
             self.touching_water = w.in_water(self.bounds());
-            let alive = self.position.y >= w.below_world_y() && self.age < 1200;
+            // No age limit: `DragonFireball` lives until it hits or leaves the world.
+            let alive = self.position.y >= w.below_world_y();
             return (alive, Hit::None);
         }
         // LlamaSpit never discards on an entity: `onHitEntity` only hurts, so
@@ -1866,10 +1867,7 @@ impl Projectile {
                 self.velocity.y * drag - self.get_gravity(),
                 self.velocity.z * drag,
             );
-            return (
-                self.position.y >= w.below_world_y() && self.age < 6000,
-                spit_hit,
-            );
+            return (self.position.y >= w.below_world_y(), spit_hit);
         }
         self.position = to;
         // `AbstractHurtingProjectile.tick` (fireballs and wind charges) eases towards the motion
@@ -1883,8 +1881,9 @@ impl Projectile {
         // it touches now, and their currents push it.
         self.touching_water = w.in_water(self.bounds());
         self.velocity = w.pushed_by_currents(self.bounds(), self.velocity);
-        let alive = self.position.y >= w.below_world_y()
-            && self.age < if self.is_fireball() { 1200 } else { 6000 };
+        // No kind counts its age: a projectile that meets nothing lives as long
+        // as its chunk does. `Entity.onBelowWorld` is the only removal here.
+        let alive = self.position.y >= w.below_world_y();
         (alive, Hit::None)
     }
     /// AbstractArrow.onHitEntity damage: ceil(speed * base) plus crit bonus.
@@ -2799,6 +2798,38 @@ mod tests {
         assert!((p.position.x - 1.0).abs() < 1e-9);
         assert_eq!(p.velocity.x.to_bits(), 0x3fef_ae14_8000_0000);
         assert!((p.velocity.y + 0.06).abs() < 1e-9);
+    }
+    /// Vanilla's projectile classes count no age: a fireball summoned with
+    /// `acceleration_power:0`, a `NoGravity` thrown item and a llama spit that
+    /// meet nothing live as long as their chunk does (#20710). `Entity.onBelowWorld`
+    /// is still a removal.
+    #[test]
+    fn a_projectile_that_meets_nothing_has_no_lifetime() {
+        let w = Empty(vec![]);
+        for kind in [
+            ProjectileKind::LargeFireball { power: 0 },
+            ProjectileKind::DragonFireball,
+            ProjectileKind::WitherSkull { dangerous: false },
+            ProjectileKind::WindCharge,
+            ProjectileKind::EnderPearl,
+            ProjectileKind::Snowball,
+            ProjectileKind::LlamaSpit,
+        ] {
+            let label = format!("{kind:?}");
+            let mut p = Projectile::new(kind, Vec3::new(0.5, 100.0, 0.5), None);
+            // Nothing brings it down and nothing is on its way: the motionless
+            // projectile of `/summon ... {NoGravity:1b,acceleration_power:0d}`.
+            p.no_gravity = true;
+            p.acceleration = 0.0;
+            for _ in 0..6001 {
+                let age = p.age;
+                assert!(p.tick(&w).0, "{label} discarded at age {age}");
+            }
+            assert_eq!(p.age, 6001, "{label}");
+        }
+        let mut below =
+            Projectile::new(ProjectileKind::Snowball, Vec3::new(0.5, -129.0, 0.5), None);
+        assert!(!below.tick(&w).0, "onBelowWorld still discards");
     }
     #[test]
     fn arrow_damage_is_speed_times_base() {
